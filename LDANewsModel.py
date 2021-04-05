@@ -24,11 +24,9 @@ class LDANewsModel:
             inputCol='words', outputCol='raw_features', vocabSize=100_000, minDF=10)
         self.idf = IDF(inputCol='raw_features', outputCol='features')
         self.news: DataFrame = news_df
-        self._words_data: DataFrame = self.tokenizer.transform(self.news)
-        self._stemmer = SnowballStemmer('russian')
         self._trained_model: LDAModel = None
 
-    def fit(self, num_topics: int = 5, max_iterations: int = 20, thresholds: tuple = (3, 6)) -> LDA:
+    def fit(self, num_topics: int = 5, max_iterations: int = 20, thresholds: tuple = (3, 6)) -> LDAModel:
         # TODO: write documentation
         data, cv_model = self.preprocess(data=self.news, thresholds=thresholds)
 
@@ -40,6 +38,14 @@ class LDANewsModel:
         return result, cv_model
 
     def predict(self, data: DataFrame):
+        """Get predictions on new data
+
+        Args:
+            data (DataFrame): text corpus
+
+        Returns:
+            [type]: [description]
+        """
         assert self._trained_model is not None, 'Train model first'
         preprocessed_data, cv_model = self.preprocess(data)
         prediction = self._trained_model.transform(preprocessed_data)
