@@ -4,9 +4,10 @@ import numpy as np
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from pyspark.ml.clustering import LDA, LDAModel
-from pyspark.ml.feature import (IDF, CountVectorizer, RegexTokenizer,
+from pyspark.ml.feature import (CountVectorizerModel, IDF, CountVectorizer, RegexTokenizer,
                                 StopWordsRemover)
 from pyspark.sql import DataFrame
+from pyspark.sql.column import Column
 from pyspark.sql.functions import col, udf
 from pyspark.sql.types import ArrayType, StringType
 
@@ -14,6 +15,7 @@ from pyspark.sql.types import ArrayType, StringType
 class LDANewsModel:
     """PySpark LDA model
     """
+    
 
     def __init__(self, news_df: DataFrame) -> None:
         # TODO: write documentation
@@ -24,18 +26,34 @@ class LDANewsModel:
             inputCol='words', outputCol='raw_features', vocabSize=100_000, minDF=10)
         self.idf = IDF(inputCol='raw_features', outputCol='features')
         self.news: DataFrame = news_df
-        self._trained_model: LDAModel = None
+        self.__trained_model: LDAModel
+        self.__fit_data: DataFrame
+        self.__cv_fit_data: CountVectorizerModel
 
-    def fit(self, num_topics: int = 5, max_iterations: int = 20, thresholds: tuple = (3, 6)) -> LDAModel:
+    def fit(self, num_topics: int = 5, max_iterations: int = 100, thresholds: tuple = (3, 6)) -> tuple[LDAModel, CountVectorizerModel]:
         # TODO: write documentation
-        data, cv_model = self.preprocess(data=self.news, thresholds=thresholds)
-
+        self.__fit_data, self.__cv_fit_data = self.preprocess(
+            data=self.news, thresholds=thresholds)
+        self.__fit_data.repartition(12).cache()
         # LDA
-        lda_model = LDA(featuresCol='tf', k=num_topics,
-                        maxIter=max_iterations)
-        result = lda_model.fit(data[['id', 'tf']])
-        self._trained_model = result
-        return result, cv_model
+        lda_model = LDA(featuresCol='tf', k=num_topics, maxIter=max_iterations)
+        self.__trained_model = lda_model.fit(self.__fit_data.select(['id', 'tf']))
+        return self.__trained_model, self.__cv_fit_data
+
+    def fit_predict(self, num_topics: int = 5, max_iterations: int = 100, thresholds: tuple = (3, 6)):
+        """Same as calling fit and then predict on the same data but faster
+
+        Args:
+            num_topics (int, optional): number of desired topics. Defaults to 5.
+            max_iterations (int, optional): max iterations for LDA. Defaults to 100.
+            thresholds (tuple, optional): idf coefficients for stopwords generator. Defaults to (3, 6).
+
+        Returns:
+            tuple[LDAModel, CountVectorizerModel, DataFrame]: model and it's predictions
+        """
+        self.fit(num_topics, max_iterations, thresholds)
+        preidction = self.__trained_model.transform(self.__fit_data)
+        return self.__trained_model, self.__cv_fit_data, preidction
 
     def predict(self, data: DataFrame):
         """Get predictions on new data
@@ -46,12 +64,13 @@ class LDANewsModel:
         Returns:
             [type]: [description]
         """
-        assert self._trained_model is not None, 'Train model first'
+        assert self.__trained_model is not None, 'Train model first'
         preprocessed_data, cv_model = self.preprocess(data)
-        prediction = self._trained_model.transform(preprocessed_data)
+        print('Done!')
+        prediction = self.__trained_model.transform(preprocessed_data)
         return prediction, cv_model
 
-    def preprocess(self, data: DataFrame, thresholds=(3, 6)) -> DataFrame:
+    def preprocess(self, data: DataFrame, thresholds=(3, 6)) -> tuple[DataFrame, CountVectorizerModel]:
         """Preprocess corpus (tokenization, stopwords, stemming)
 
         Returns:
@@ -91,17 +110,14 @@ class LDANewsModel:
         if not use_tfidf:
             return stopwords.words('russian')
 
-        # Считаем частотности
-        count_vectorizer = CountVectorizer(inputCol='words', outputCol='raw_features',
-                                           vocabSize=100_000, minDF=10)
-        count_model = count_vectorizer.fit(words_data)
+        # Calculate frequencies
+        count_model = self.count_vectorizer.fit(words_data)
         count_data = count_model.transform(words_data)
-        # Получаем tf-idf
+        # Calculating idf
         idf_model = self.idf.fit(count_data)
-        idfs_values = idf_model.idf.values
-        rare_words = idfs_values < thresholds[0]
-        common_words = idfs_values > thresholds[1]
-        mask = np.logical_or(common_words, rare_words)
+        idfs_values = idf_model.idf.toArray()
+        mask = np.logical_or(
+            idfs_values < thresholds[0], idfs_values > thresholds[1])
         stop_words = np.array(count_model.vocabulary)[mask]
         return stop_words
 
