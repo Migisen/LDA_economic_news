@@ -4,8 +4,9 @@ import numpy as np
 from nltk.corpus import stopwords
 from nltk.stem import SnowballStemmer
 from pyspark.ml.clustering import LDA, LDAModel
-from pyspark.ml.feature import (CountVectorizerModel, IDF, CountVectorizer, RegexTokenizer,
-                                StopWordsRemover)
+from pyspark.ml.feature import (IDF, CountVectorizer, CountVectorizerModel,
+                                NGram, RegexTokenizer, StopWordsRemover,
+                                VectorAssembler)
 from pyspark.sql import DataFrame
 from pyspark.sql.column import Column
 from pyspark.sql.functions import col, udf
@@ -15,7 +16,6 @@ from pyspark.sql.types import ArrayType, StringType
 class LDANewsModel:
     """PySpark LDA model
     """
-    
 
     def __init__(self, news_df: DataFrame) -> None:
         # TODO: write documentation
@@ -23,9 +23,10 @@ class LDANewsModel:
                                         pattern=r'[а-яА-Я]+', toLowercase=True,
                                         gaps=False)
         self.count_vectorizer = CountVectorizer(
-            inputCol='words', outputCol='raw_features', vocabSize=100_000, minDF=10)
+            inputCol='combined_words', outputCol='raw_features', vocabSize=100_000, minDF=10)
         self.idf = IDF(inputCol='raw_features', outputCol='features')
         self.news: DataFrame = news_df
+        self._ngram_model = NGram(n = 2, inputCol='words', outputCol='ngrams')
         self.__trained_model: LDAModel
         self.__fit_data: DataFrame
         self.__cv_fit_data: CountVectorizerModel
@@ -37,7 +38,8 @@ class LDANewsModel:
         self.__fit_data.repartition(12).cache()
         # LDA
         lda_model = LDA(featuresCol='tf', k=num_topics, maxIter=max_iterations)
-        self.__trained_model = lda_model.fit(self.__fit_data.select(['id', 'tf']))
+        self.__trained_model = lda_model.fit(
+            self.__fit_data.select(['id', 'tf']))
         return self.__trained_model, self.__cv_fit_data
 
     def fit_predict(self, num_topics: int = 5, max_iterations: int = 100, thresholds: tuple = (3, 6)):
@@ -77,12 +79,18 @@ class LDANewsModel:
             DataFrame: preprocessed spark DataFrame
         """
         # Removing stopwords
-        words_data = self.tokenizer.transform(data)
+        data = self.tokenizer.transform(data)
+        data = self._ngram_model.transform(data)
+        
+        udf_add = udf(lambda x,y: x+y, ArrayType(StringType()))
+        data = data.withColumn('combined_words', udf_add('words','ngrams'))
+        data.show()
+
         stop_words = self.calculate_stopwords(
-            data=data, words_data=words_data, thresholds=thresholds)
+            data=data, words_data=data, thresholds=thresholds)
         remover = StopWordsRemover(
-            inputCol='words', outputCol='cleared_words', stopWords=stop_words)
-        cleared_texts = remover.transform(words_data)
+            inputCol='combined_words', outputCol='cleared_words', stopWords=stop_words)
+        cleared_texts = remover.transform(data)
 
         # Stemming
         stemmingUDF = udf(self.stemUDF, ArrayType(StringType()))
